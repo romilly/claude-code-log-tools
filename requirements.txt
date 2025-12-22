@@ -1,4 +1,6 @@
 # Production dependencies
-# Add your dependencies here
+psycopg2-binary>=2.9.0
+python-dotenv>=1.0.0
+jupyter>=1.0.0
 
 # Development dependencies are in requirements-test.txt
