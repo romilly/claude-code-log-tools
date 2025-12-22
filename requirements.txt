@@ -1,0 +1,4 @@
+# Production dependencies
+# Add your dependencies here
+
+# Development dependencies are in requirements-test.txt
