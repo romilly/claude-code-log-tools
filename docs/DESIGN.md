@@ -6,8 +6,45 @@ This document describes the PostgreSQL schema for storing and searching Claude C
 
 The database uses three tables to store conversation data:
 
-```
-sessions 1──* messages 1──* content_blocks
+```mermaid
+erDiagram
+    sessions ||--o{ messages : contains
+    messages ||--o{ content_blocks : contains
+
+    sessions {
+        serial id PK
+        uuid session_uuid UK
+        text project_path
+        timestamptz created_at
+        timestamptz updated_at
+        int total_input_tokens
+        int total_output_tokens
+    }
+
+    messages {
+        serial id PK
+        int session_id FK
+        text uuid
+        text type
+        text role
+        timestamptz timestamp
+        text cwd
+        int input_tokens
+        int output_tokens
+        text version
+    }
+
+    content_blocks {
+        serial id PK
+        int message_id FK
+        int block_index
+        text block_type
+        text text_content
+        text tool_name
+        jsonb tool_input
+        text tool_use_id
+        tsvector content_tsvector
+    }
 ```
 
 - **sessions** - One row per Claude Code session
