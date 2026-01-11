@@ -2,5 +2,6 @@
 psycopg2-binary>=2.9.0
 python-dotenv>=1.0.0
 jupyter>=1.0.0
+ollama>=0.6.1
 
 # Development dependencies are in requirements-test.txt
