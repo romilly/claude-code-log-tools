@@ -4,17 +4,19 @@ This document describes the PostgreSQL schema for storing and searching Claude C
 
 ## Schema Overview
 
-The database uses three tables to store conversation data:
+The database uses four tables to store conversation data:
 
 ```mermaid
 erDiagram
     sessions ||--o{ messages : contains
     messages ||--o{ content_blocks : contains
+    import_metadata ||--|| sessions : "tracks per project"
 
     sessions {
         serial id PK
         uuid session_uuid UK
         text project_path
+        text summary
         timestamptz created_at
         timestamptz updated_at
         int total_input_tokens
@@ -24,7 +26,7 @@ erDiagram
     messages {
         serial id PK
         int session_id FK
-        text uuid
+        text uuid UK
         text type
         text role
         timestamptz timestamp
@@ -45,13 +47,19 @@ erDiagram
         text tool_use_id
         tsvector content_tsvector
     }
+
+    import_metadata {
+        text project_path PK
+        timestamptz last_import_timestamp
+    }
 ```
 
 - **sessions** - One row per Claude Code session
 - **messages** - One row per log entry (envelope/metadata)
 - **content_blocks** - One row per content block within a message
+- **import_metadata** - Tracks last import timestamp per project for idempotent imports
 
-## Why Three Tables?
+## Why Three Content Tables?
 
 Claude Code logs have a nested structure:
 - User messages contain plain text
@@ -68,6 +76,20 @@ We chose option 3 because a key use case is debugging failed conversations. This
 - Correlating tool calls with their results
 - Finding patterns in what went wrong
 
+## Idempotent Imports
+
+The `import_metadata` table enables safe re-running of imports:
+
+1. Before importing, look up `last_import_timestamp` for the project
+2. Skip JSONL entries with timestamps at or before the cutoff
+3. A unique partial index on `messages.uuid` provides a safety net against duplicates
+4. After successful import, update `last_import_timestamp` to the max timestamp seen
+
+Log entry types are handled as follows:
+- `file-history-snapshot` — skipped entirely (no useful content)
+- `summary` — captured as metadata on the session, not inserted as a message
+- All other types — imported normally, subject to timestamp filtering
+
 ## Table Definitions
 
 ### sessions
@@ -77,6 +99,7 @@ CREATE TABLE sessions (
     id SERIAL PRIMARY KEY,
     session_uuid UUID UNIQUE NOT NULL,
     project_path TEXT,
+    summary TEXT,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     total_input_tokens INT DEFAULT 0,
@@ -86,9 +109,10 @@ CREATE TABLE sessions (
 
 **Purpose**: Groups messages by Claude Code session. Tracks aggregate token usage.
 
-**Notes**:
-- `session_uuid` comes from the log file's `sessionId` field
-- `project_path` is derived from the file's location in `~/.claude/projects/`
+**Fields**:
+- `session_uuid` — comes from the log file's `sessionId` field
+- `project_path` — derived from the file's location in `~/.claude/projects/`
+- `summary` — session title from `summary` log entries (e.g. "CLI Session Ended")
 
 ### messages
 
@@ -110,11 +134,12 @@ CREATE TABLE messages (
 **Purpose**: Stores the message envelope (metadata) without content.
 
 **Fields**:
-- `type` - Log entry type: 'user', 'assistant', 'system', 'summary', 'file-history-snapshot', 'queue-operation'
-- `role` - Message role from the API: 'user' or 'assistant'
-- `cwd` - Working directory at time of message
-- `input_tokens`, `output_tokens` - Token usage for this message
-- `version` - Claude Code version
+- `type` — Log entry type: 'user', 'assistant', 'system'
+- `role` — Message role from the API: 'user' or 'assistant'
+- `uuid` — Unique identifier from the log entry (unique partial index excludes NULLs)
+- `cwd` — Working directory at time of message
+- `input_tokens`, `output_tokens` — Token usage for this message
+- `version` — Claude Code version
 
 **Notes**:
 - Content is stored separately in `content_blocks`
@@ -147,10 +172,10 @@ CREATE TABLE content_blocks (
 **Purpose**: Stores individual content blocks with type-specific fields.
 
 **Block types**:
-- `text` - Text response from Claude (stored in `text_content`)
-- `thinking` - Extended thinking block (stored in `text_content`)
-- `tool_use` - Tool invocation (stored in `tool_name`, `tool_input`, `tool_use_id`)
-- `tool_result` - Tool output (stored in `text_content`, `tool_use_id`)
+- `text` — Text response from Claude (stored in `text_content`)
+- `thinking` — Extended thinking block (stored in `text_content`)
+- `tool_use` — Tool invocation (stored in `tool_name`, `tool_input`, `tool_use_id`)
+- `tool_result` — Tool output (stored in `text_content`, `tool_use_id`)
 
 **Key design decisions**:
 
@@ -160,6 +185,21 @@ CREATE TABLE content_blocks (
 
 3. **`content_tsvector` is GENERATED STORED**: PostgreSQL automatically maintains the full-text search index when `text_content` changes. "STORED" materializes the vector for faster searches.
 
+### import_metadata
+
+```sql
+CREATE TABLE import_metadata (
+    project_path TEXT PRIMARY KEY,
+    last_import_timestamp TIMESTAMPTZ NOT NULL
+);
+```
+
+**Purpose**: Tracks the most recent timestamp imported per project, enabling idempotent imports.
+
+**Notes**:
+- `project_path` matches the `project_path` stored on sessions
+- Updated at the end of each successful import to the max timestamp seen
+
 ## Indexes
 
 ```sql
@@ -168,6 +208,9 @@ CREATE INDEX idx_messages_session_id ON messages(session_id);
 CREATE INDEX idx_messages_type ON messages(type);
 CREATE INDEX idx_messages_timestamp ON messages(timestamp DESC);
 CREATE INDEX idx_messages_session_timestamp ON messages(session_id, timestamp DESC);
+
+-- Unique partial index for idempotent imports (excludes NULL uuids)
+CREATE UNIQUE INDEX idx_messages_uuid_unique ON messages(uuid) WHERE uuid IS NOT NULL;
 
 -- Content block lookups
 CREATE INDEX idx_content_blocks_message_id ON content_blocks(message_id);
@@ -180,11 +223,12 @@ CREATE INDEX idx_content_blocks_fts ON content_blocks USING GIN(content_tsvector
 ```
 
 **Why these indexes**:
-- `session_id`, `message_id` - Foreign key lookups
-- `timestamp DESC` - Recent-first queries
-- `tool_use_id` - Joining tool calls to results
-- `tool_name` - Filtering by specific tool
-- `GIN(content_tsvector)` - Fast full-text search
+- `session_id`, `message_id` — Foreign key lookups
+- `timestamp DESC` — Recent-first queries
+- `uuid` (unique partial) — Prevents duplicate message imports
+- `tool_use_id` — Joining tool calls to results
+- `tool_name` — Filtering by specific tool
+- `GIN(content_tsvector)` — Fast full-text search
 
 ## Example Queries
 
