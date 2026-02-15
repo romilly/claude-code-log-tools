@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     id SERIAL PRIMARY KEY,
     session_uuid UUID UNIQUE NOT NULL,
     project_path TEXT,
+    summary TEXT,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     total_input_tokens INT DEFAULT 0,
@@ -47,11 +48,21 @@ CREATE TABLE IF NOT EXISTS content_blocks (
     ) STORED
 );
 
+-- Import metadata: tracks last import timestamp per project for idempotent imports
+CREATE TABLE IF NOT EXISTS import_metadata (
+    project_path TEXT PRIMARY KEY,
+    last_import_timestamp TIMESTAMPTZ NOT NULL
+);
+
 -- Indexes for messages
 CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_type ON messages(type);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp ON messages(session_id, timestamp DESC);
+
+-- Unique index on messages.uuid as safety net for idempotent imports
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_uuid_unique
+    ON messages(uuid) WHERE uuid IS NOT NULL;
 
 -- Indexes for content_blocks
 CREATE INDEX IF NOT EXISTS idx_content_blocks_message_id ON content_blocks(message_id);
